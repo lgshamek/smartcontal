@@ -1,10 +1,11 @@
-,h'<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Libro Diario - martconta</title>
 <style>
+/* --- (tu CSS original sin cambios) --- */
 body{font-family:"Segoe UI",Arial,sans-serif;background:#f4f6f9;margin:0;padding:20px;color:#222}
 .card{background:#fff;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.1);padding:16px;max-width:1200px;margin:auto}
 h2{margin-top:0;color:#1e293b;text-align:center}
@@ -159,6 +160,12 @@ button:hover{opacity:.9}
     <button id="import" class="secondary">📂 Importar</button>
     <input type="file" id="importFile" accept=".csv" style="display:none">
     <button id="print" class="secondary">🖨️ PDF</button>
+
+    <!-- === BOTÓN IA (OPCIÓN B) === -->
+    <!-- Archivo oculto para subir comprobante -->
+    <input type="file" id="iaFile" accept="image/*" style="display:none">
+    <!-- Botón visible junto a los controles -->
+    <button id="iaBtn" style="background:#7c3aed;color:#fff">🤖 IA: Leer Comprobante y Crear Asiento</button>
   </div>
 
   <!-- Tabla principal -->
@@ -194,7 +201,7 @@ const tbody = document.querySelector("#tabla tbody");
 const totalDebe = document.getElementById("totalDebe");
 const totalHaber = document.getElementById("totalHaber");
 
-// Catálogo de cuentas
+// Catálogo de cuentas (igual que tu original)
 const cuentas= {
   "10": "Efectivo y equivalentes de efectivo",
   "12": "Cuentas por cobrar comerciales – Terceros",
@@ -263,7 +270,6 @@ const cuentas= {
   "99": "Cuentas de orden"
 };
 
-
 // Renderizar tabla
 function render(){
   tbody.innerHTML="";
@@ -297,9 +303,7 @@ document.getElementById("codigo").addEventListener("input", e=>{
   document.getElementById("denom").value=cuentas[cod]||"";
 });
 
-
 // === CRUD de ASIENTOS ===
-
 // AGREGAR ASIENTO
 document.getElementById("add").addEventListener("click", () => {
   const fecha = fechaInput.value;
@@ -337,7 +341,6 @@ function eliminarAsiento(i) {
 
 // EDITAR ASIENTO
 let editIndex = null;
-
 function editarAsiento(i) {
   const a = asientos[i];
   editIndex = i;
@@ -417,7 +420,6 @@ const codigoInput = document.getElementById("codigo");
 const denomInput = document.getElementById("denom");
 const tipoInput = document.getElementById("tipo");
 const montoInput = document.getElementById("monto");
-
 
 // EXPORTAR CSV
 document.getElementById("export").addEventListener("click",()=>{/* ... */});
@@ -517,7 +519,6 @@ document.getElementById("print").addEventListener("click", () => {
   ventanaPrint.print();
 });
 
-
 // === BLOQUE DE LIBROS MAYORES ===
 document.addEventListener("DOMContentLoaded", () => {
   const btnGenMayores = document.createElement("button");
@@ -607,6 +608,189 @@ document.addEventListener("DOMContentLoaded", () => {
     ventanaPrint.print();
   });
 });
+
+/* =========================
+   === INTEGRACIÓN IA B ===
+   Botón junto a "Agregar Asiento" que:
+   - solicita imagen (boleta/factura)
+   - envía a OpenAI Vision (Chat completions con image)
+   - extrae JSON (tipo, fecha, subtotal, igv, total, proveedor/cliente, metodo_pago)
+   - genera automáticamente los asientos en la tabla
+   Nota: reemplaza 'TU_API_KEY' por tu clave real.
+   ========================= */
+
+const iaBtn = document.getElementById("iaBtn");
+const iaFile = document.getElementById("iaFile");
+
+iaBtn.addEventListener("click", () => iaFile.click());
+
+iaFile.addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  // Previsualización breve: usar fecha input si existe
+  const today = new Date().toISOString().split("T")[0];
+  const fechaParaAsiento = fechaInput.value || today;
+
+  // Convertir a base64
+  const base64 = await toBase64(file);
+  const clean = base64.split(",")[1];
+
+  // Muestra una alerta / bloqueo breve
+  iaBtn.disabled = true;
+  iaBtn.textContent = "Procesando IA…";
+
+  try {
+    // Llamada a OpenAI (Chat Completions con imagen)
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer TU_API_KEY" // <-- Reemplaza por tu API key
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: `Eres un asistente contable. Lee la imagen adjunta (boleta o factura) y devuelve SOLO un JSON limpio con estas claves:
+- tipo (Factura o Boleta)
+- ruc
+- razon_social
+- fecha (YYYY-MM-DD)
+- serie
+- numero
+- subtotal
+- igv
+- total
+- proveedor (o cliente)
+- metodo_pago (contado/credito)
+- items: [{descripcion,cantidad,precio,importe}]
+Devuelve únicamente el JSON sin texto adicional.`},
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${clean}` } }
+            ]
+          }
+        ],
+        temperature: 0
+      })
+    });
+
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content || data.choices?.[0]?.message || JSON.stringify(data);
+
+    // A veces la IA devuelve texto con explicaciones; extraemos el bloque JSON
+    let jsonText = raw;
+    // Si contiene ```json ``` removerlo
+    jsonText = jsonText.replace(/```(?:json)?/g, "").trim();
+
+    // Extraer primer objeto JSON en el texto
+    const match = jsonText.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error("No se encontró JSON en la respuesta de la IA.");
+    const parsed = JSON.parse(match[0]);
+
+    // Mapear resultado a asientos contables básicos
+    // Suposiciones:
+    // - Compras: Debe 60 (subtotal) y 40 (igv) / Haber 42 (proveedor) o 10 (efectivo) si contado
+    // - Ventas: Debe 12 (cliente) / Haber 70 (venta subtotal) y 40 (igv)
+    const d = parsed;
+    const tipoComp = (d.tipo || "").toLowerCase();
+    const subtotal = parseFloat(d.subtotal) || 0;
+    const igv = parseFloat(d.igv) || 0;
+    const total = parseFloat(d.total) || (subtotal + igv);
+    const metodo = (d.metodo_pago || "").toLowerCase();
+    const proveedorCliente = d.proveedor || d.cliente || d.razon_social || "";
+
+    // Fecha a usar
+    const asientoFecha = d.fecha || fechaParaAsiento;
+
+    if (tipoComp.includes("fact") || tipoComp.includes("boleta") || tipoComp.includes("venta")) {
+      // Si es venta (comprobante de venta)
+      // 1) Debe 12 Clientes -> total
+      asientos.push({
+        fecha: asientoFecha,
+        glosa: `Venta - ${proveedorCliente} ${d.serie || ""}-${d.numero || ""}`,
+        codigo: "12",
+        denom: cuentas["12"] || "Clientes",
+        debe: total,
+        haber: 0
+      });
+      // 2) Haber 70 Ventas -> subtotal
+      asientos.push({
+        fecha: asientoFecha,
+        glosa: `Venta - ${proveedorCliente}`,
+        codigo: "70",
+        denom: cuentas["70"] || "Ventas",
+        debe: 0,
+        haber: subtotal
+      });
+      // 3) Haber 40 IGV -> igv
+      if (igv > 0) {
+        asientos.push({
+          fecha: asientoFecha,
+          glosa: `IGV Venta - ${proveedorCliente}`,
+          codigo: "40",
+          denom: cuentas["40"] || "IGV",
+          debe: 0,
+          haber: igv
+        });
+      }
+    } else {
+      // Asumimos compra/egreso (factura/boleta de compra)
+      // 1) Debe 60 Compras -> subtotal
+      if (subtotal > 0) {
+        asientos.push({
+          fecha: asientoFecha,
+          glosa: `Compra - ${proveedorCliente} ${d.serie || ""}-${d.numero || ""}`,
+          codigo: "60",
+          denom: cuentas["60"] || "Compras",
+          debe: subtotal,
+          haber: 0
+        });
+      }
+      // 2) Debe 40 IGV -> igv
+      if (igv > 0) {
+        asientos.push({
+          fecha: asientoFecha,
+          glosa: `IGV Compra - ${proveedorCliente}`,
+          codigo: "40",
+          denom: cuentas["40"] || "IGV",
+          debe: igv,
+          haber: 0
+        });
+      }
+      // 3) Haber -> Proveedor (42) si crédito, o Caja(10) si contado
+      const haberCodigo = metodo.includes("cont") ? "10" : "42";
+      asientos.push({
+        fecha: asientoFecha,
+        glosa: `Pago/Obligación a ${proveedorCliente}`,
+        codigo: haberCodigo,
+        denom: cuentas[haberCodigo] || (haberCodigo === "10" ? "Caja" : "Proveedores"),
+        debe: 0,
+        haber: total
+      });
+    }
+
+    render();
+    alert("✅ Asientos generados por IA y añadidos al Libro Diario.");
+  } catch (err) {
+    console.error(err);
+    alert("❌ Error al procesar con IA: " + (err.message || err));
+  } finally {
+    iaBtn.disabled = false;
+    iaBtn.textContent = "🤖 IA: Leer Comprobante y Crear Asiento";
+    iaFile.value = ""; // reset input
+  }
+});
+
+// Helper: file -> base64
+function toBase64(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = ()=>resolve(reader.result);
+    reader.onerror = err=>reject(err);
+  });
+}
 </script>
 </body>
 </html>
